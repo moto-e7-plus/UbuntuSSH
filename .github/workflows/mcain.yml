@@ -1,58 +1,86 @@
-name: ROOT SSH CLOUD
+name: Anonymous Passwordless SSH Server with Bore.pub
 
 on:
   workflow_dispatch:
 
 jobs:
-  ssh:
+  ssh-server:
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      # Liberar espaço
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -a -f
+    # Instalar SSH + Rust
+    - name: Install SSH Server and Rust
+      run: |
+        sudo apt update
+        sudo apt install -y openssh-server curl build-essential git
 
-      # Instalar pacotes
-      - name: Install tools
-        run: |
-          sudo apt update
-          sudo apt install -y openssh-server curl wget git
+        # Install Rust
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-      # Configurar SSH ROOT
-      - name: Setup SSH Root
-        run: |
-          sudo service ssh start
+    # Instalar bore
+    - name: Install Bore CLI
+      run: |
+        cargo install bore-cli
 
-          # senha root (MUDE)
-          echo "root:123456" | sudo chpasswd
+    # Configurar SSH sem senha
+    - name: Configure Passwordless SSH
+      run: |
+        sudo tee /etc/ssh/sshd_config > /dev/null <<EOF
+        Port 22
+        Protocol 2
+        PasswordAuthentication yes
+        PermitEmptyPasswords yes
+        PubkeyAuthentication no
+        ChallengeResponseAuthentication no
+        PermitRootLogin yes
+        StrictModes no
+        UsePAM no
+        EOF
 
-          sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+    # Criar usuários sem senha
+    - name: Create Passwordless Users
+      run: |
+        sudo passwd -d root || true
 
-          sudo service ssh restart
+        sudo useradd -m -s /bin/bash topuser || true
+        sudo passwd -d topuser
 
-      # Instalar Cloudflare Tunnel
-      - name: Install Cloudflared
-        run: |
-          wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-          chmod +x cloudflared-linux-amd64
-          sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+        sudo usermod -aG sudo topuser
+        echo 'topuser ALL=(ALL) NOPASSWD: ALL' | sudo tee /etc/sudoers.d/topuser
+        sudo chmod 440 /etc/sudoers.d/topuser
 
-      # Abrir túnel SSH público
-      - name: Open SSH Tunnel
-        run: |
-          echo "================ SSH INFO ================"
-          echo "Espere aparecer uma URL cloudflare"
-          echo "Depois conecte com:"
-          echo "ssh root@URL -p 22"
-          echo "Senha: 123456"
-          echo "=========================================="
+    # Start SSH
+    - name: Start SSH Server
+      run: |
+        sudo ssh-keygen -A
+        sudo systemctl restart ssh
+        sudo ss -tlnp | grep :22 || true
 
-          cloudflared tunnel --url ssh://localhost:22 &
-          sleep 21600
+    # Start Bore Tunnel
+    - name: Start Bore Tunnel
+      run: |
+        echo "🚀 Starting bore tunnel..."
+        bore local 22 --to bore.pub > bore_output.txt 2>&1 &
+        sleep 15
+
+        echo "================ SSH INFO ================"
+        cat bore_output.txt
+        echo "=========================================="
+
+        # Extrair porta automaticamente
+        PORT=$(grep -oE "bore.pub:[0-9]+" bore_output.txt | cut -d: -f2)
+        echo "PORT=$PORT" >> $GITHUB_ENV
+
+        echo "=========================================="
+        echo "SSH COMMAND:"
+        echo "ssh root@bore.pub -p $PORT"
+        echo "ssh topuser@bore.pub -p $PORT"
+        echo "Senha: ENTER (vazia)"
+        echo "=========================================="
+
+        sleep 21600
